@@ -6,5 +6,5 @@ import react from '@vitejs/plugin-react'
 // <user>.github.io, or if you're using a custom domain.
 export default defineConfig({
   plugins: [react()],
-  base: '/inkline/',
+  base: '/docsign/',
 })

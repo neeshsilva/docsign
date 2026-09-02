@@ -2,10 +2,11 @@ import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabaseClient'
-import { canCreateDocument } from '../lib/usage'
+import { canCreateDocument, MAX_FILE_BYTES, formatBytes } from '../lib/usage'
 import { sha256Hex, embedSignature } from '../lib/pdfSigning'
 import Layout from '../components/Layout'
 import SignaturePad from '../components/SignaturePad'
+import SignatureTyper from '../components/SignatureTyper'
 import SignaturePlacer from '../components/SignaturePlacer'
 import ConsentModal from '../components/ConsentModal'
 
@@ -19,10 +20,12 @@ export default function SignDocument() {
   const [step, setStep] = useState(STEPS.PICK_FILE)
   const [file, setFile] = useState(null)
   const [signatureDataUrl, setSignatureDataUrl] = useState(null)
-  const [placement, setPlacement] = useState(null)
+  const [placements, setPlacements] = useState([])
   const [showConsent, setShowConsent] = useState(false)
   const [error, setError] = useState('')
   const [working, setWorking] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [sigMode, setSigMode] = useState('type')
   const [resultUrl, setResultUrl] = useState(null)
 
   async function handleFileChosen(e) {
@@ -33,20 +36,56 @@ export default function SignDocument() {
       setError('Please choose a PDF file.')
       return
     }
-
-    const allowed = await canCreateDocument(user.id)
-    if (!allowed) {
-      setError("You've reached the free plan's 10 documents/month limit. It resets on the 1st.")
+    // Check the size before anything reads the file. Signing renders every
+    // page to a canvas and hashes the bytes twice, so an oversized PDF would
+    // otherwise lock the tab up for a while and only fail at upload, once
+    // the storage bucket rejects it.
+    if (chosen.size > MAX_FILE_BYTES) {
+      setError(
+        `That file is ${formatBytes(chosen.size)}. The limit is ${formatBytes(MAX_FILE_BYTES)}.`,
+      )
       return
+    }
+
+    // The limit check is a courtesy: it tells the user now rather than after
+    // they have drawn and placed a signature. The database enforces the same
+    // limit on insert, so if this check cannot run we let them through rather
+    // than stranding them on this step -- an unreachable check must not be
+    // the thing that stops someone signing.
+    setChecking(true)
+    try {
+      const allowed = await canCreateDocument(user.id)
+      if (!allowed) {
+        setError("You've reached the free plan's 10 documents/month limit. It resets on the 1st.")
+        return
+      }
+    } catch (err) {
+      console.error('Could not check the monthly document limit:', err)
+    } finally {
+      setChecking(false)
     }
 
     setFile(chosen)
     setStep(STEPS.DRAW_SIGN)
   }
 
+  // Switching methods clears the signature. The two modes each own their own
+  // canvas, so keeping the old image would leave the user looking at a blank
+  // pad while a signature they can no longer see is what gets embedded.
+  function switchSigMode(mode) {
+    if (mode === sigMode) return
+    setSignatureDataUrl(null)
+    setError('')
+    setSigMode(mode)
+  }
+
   function handleContinueToPlacement() {
     if (!signatureDataUrl) {
-      setError('Draw your signature first.')
+      setError(
+        sigMode === 'type'
+          ? 'Type your name and pick a style first.'
+          : 'Draw your signature first.',
+      )
       return
     }
     setError('')
@@ -54,7 +93,7 @@ export default function SignDocument() {
   }
 
   function handleContinueToConsent() {
-    if (!placement) {
+    if (!placements.length) {
       setError('Click on the document to choose where your signature goes.')
       return
     }
@@ -77,7 +116,7 @@ export default function SignDocument() {
         signaturePngDataUrl: signatureDataUrl,
         signerEmail: user.email,
         signedAtIso: consentedAt,
-        placement,
+        placements,
       })
 
       const hashAfter = await sha256Hex(signedPdfBytes.buffer.slice(0))
@@ -88,6 +127,9 @@ export default function SignDocument() {
         .upload(path, new Blob([signedPdfBytes], { type: 'application/pdf' }))
       if (uploadError) throw uploadError
 
+      // signed_at is stamped by a database trigger, not sent from here:
+      // the free-tier count is derived from it, so a client that could
+      // write it could backdate its way past the monthly limit.
       const { data: docRow, error: docError } = await supabase
         .from('documents')
         .insert({
@@ -97,32 +139,18 @@ export default function SignDocument() {
           storage_path: path,
           hash_before: hashBefore,
           hash_after: hashAfter,
-          signed_at: consentedAt,
         })
         .select()
         .single()
       if (docError) throw docError
 
-      // Best-effort client-reported IP for the audit trail — see LEGAL.md
-      // for why this should move server-side before relying on it heavily.
-      let ip = null
-      try {
-        const res = await fetch('https://api.ipify.org?format=json')
-        ip = (await res.json()).ip
-      } catch {
-        ip = null
-      }
-
+      // Only document_id and consent travel from the browser. The signer,
+      // both timestamps, the IP and the hashes are stamped by a database
+      // trigger — sending them from here would be theatre, since anything
+      // the client can set, the client can forge.
       const { error: auditError } = await supabase.from('audit_log').insert({
         document_id: docRow.id,
-        signer_id: user.id,
-        signer_email: user.email,
         consented: true,
-        consented_at: consentedAt,
-        signed_at: consentedAt,
-        ip_address: ip,
-        hash_before: hashBefore,
-        hash_after: hashAfter,
       })
       if (auditError) throw auditError
 
@@ -148,29 +176,64 @@ export default function SignDocument() {
       {step === STEPS.PICK_FILE && (
         <div className="card">
           <h3>1. Choose a PDF</h3>
-          <p>Only PDF files are supported right now.</p>
+          <p>Only PDF files are supported right now, up to {formatBytes(MAX_FILE_BYTES)}.</p>
           <input
             ref={fileInputRef}
             type="file"
             accept="application/pdf"
             onChange={handleFileChosen}
+            disabled={checking}
           />
+          {checking && <p style={{ color: 'var(--slate)' }}>Checking your plan…</p>}
         </div>
       )}
 
       {step === STEPS.DRAW_SIGN && (
         <div className="card">
-          <h3>2. Draw your signature</h3>
+          <h3>2. Create your signature</h3>
           <p style={{ color: 'var(--slate)' }}>File: {file?.name}</p>
-          <SignaturePad onChange={setSignatureDataUrl} />
+
+          <div className="sig-mode-tabs" role="tablist" aria-label="Signature method">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sigMode === 'type'}
+              className={`sig-mode-tab${sigMode === 'type' ? ' is-active' : ''}`}
+              onClick={() => switchSigMode('type')}
+            >
+              Type it
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sigMode === 'draw'}
+              className={`sig-mode-tab${sigMode === 'draw' ? ' is-active' : ''}`}
+              onClick={() => switchSigMode('draw')}
+            >
+              Draw it
+            </button>
+          </div>
+
+          {sigMode === 'type' ? (
+            <SignatureTyper
+              defaultName={user.user_metadata?.full_name ?? ''}
+              onChange={setSignatureDataUrl}
+            />
+          ) : (
+            <SignaturePad onChange={setSignatureDataUrl} />
+          )}
           <div style={{ marginTop: '1rem', display: 'flex', gap: '0.75rem' }}>
-            <button className="btn btn-primary" onClick={handleContinueToPlacement}>
+            <button
+              className="btn btn-primary"
+              onClick={handleContinueToPlacement}
+              disabled={!signatureDataUrl}
+            >
               Continue
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => {
-                setPlacement(null)
+                setPlacements([])
                 setStep(STEPS.PICK_FILE)
               }}
               disabled={working}
@@ -187,8 +250,9 @@ export default function SignDocument() {
           <SignaturePlacer
             file={file}
             signatureDataUrl={signatureDataUrl}
-            placement={placement}
-            onChange={setPlacement}
+            signerEmail={user.email}
+            placements={placements}
+            onChange={setPlacements}
           />
           <div style={{ marginTop: '1rem', display: 'flex', gap: '0.75rem' }}>
             <button className="btn btn-primary" onClick={handleContinueToConsent} disabled={working}>

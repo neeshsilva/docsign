@@ -30,9 +30,13 @@ e-signature laws entirely in some jurisdictions).
   be told they can request a paper copy. The modal records consent as its
   own timestamped event, separate from the signature itself.
 - **Audit trail** (`audit_log` table): each signing event stores the
-  signer's account email, a timestamp, a best-effort IP address, and the
-  document's SHA-256 hash before and after signing. This is what lets you
-  later prove a document wasn't altered after signing and who signed it.
+  signer's account email, a timestamp, an IP address, and the document's
+  SHA-256 hash before and after signing. This is what lets you later prove
+  a document wasn't altered after signing and who signed it. All of those
+  fields are written by a database trigger rather than sent up by the
+  browser, so a signer cannot backdate their own consent or attach an
+  audit row to someone else's document. The table is insert-only: update
+  and delete are revoked, not merely unpoliced.
 - **Tamper-evidence**: the hash is computed client-side right before and
   right after the signature is embedded, so any later edit to the PDF
   changes the hash and breaks the chain — useful as evidence, not a

@@ -7,6 +7,19 @@
    up row-level security so users can only see their own data, adds the
    10-document/month enforcement function, and creates a `documents`
    storage bucket.
+   *Already deployed before the security fixes landed?* Also paste
+   `migrations/001_security_hardening.sql` and Run. It stops users from
+   granting themselves the Pro plan, pins `search_path` on the
+   `security definer` functions, and caps the storage bucket at 25 MiB /
+   PDF-only. Then paste `migrations/002_audit_log_integrity.sql` and Run:
+   it makes the database stamp the signer, timestamps, IP and hashes on
+   every audit row instead of trusting the browser, and locks the table to
+   inserts only. Then `migrations/003_usage_limit_integrity.sql`: it stamps
+   `signed_at` server-side, fixes an off-by-one that let the free-tier
+   limit be walked past, and drops the one-argument
+   `can_create_document(uuid)` that 001 created — leaving both signatures
+   in place makes the app's `rpc()` call ambiguous (PostgREST `PGRST203`).
+   All three are idempotent, so running them twice is harmless.
 3. Go to **Authentication → Providers** and make sure **Email** is
    enabled. This app uses magic-link (passwordless) sign-in.
 4. Go to **Authentication → URL Configuration** and add your GitHub Pages

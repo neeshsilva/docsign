@@ -18,7 +18,9 @@ not legal advice, and it has not been reviewed by a lawyer.
   run this at small scale.
 - **PDF handling**: [pdf-lib](https://pdf-lib.js.org/), done client-side —
   the browser embeds the signature image and metadata into the PDF and
-  computes a SHA-256 hash before uploading the signed file.
+  computes a SHA-256 hash before uploading the signed file. A signature can
+  be dropped in as many places as you need, across any number of pages, and
+  "Copy to all pages" replicates a page's layout across the whole document.
 
 GitHub Pages only serves static files, so Supabase is what gives you a real
 database, authentication, and secure storage — without it this would just
